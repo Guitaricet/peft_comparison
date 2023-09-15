@@ -23,9 +23,13 @@ import argparse
 import json
 import math
 import os
+import random
 from pprint import pformat
 
+import numpy as np
 import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
 
 import nltk
 import datasets
@@ -47,7 +51,8 @@ from datasets import load_dataset
 import wandb
 from tqdm.auto import tqdm, trange
 from loguru import logger
-import data_utils
+
+from peft_comparison.collation import DataCollatorForSeq2SeqWithMetadata
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 datasets.utils.logging.set_verbosity_error()
@@ -77,7 +82,6 @@ def parse_args():
 
     # Dataset Configuration
     parser.add_argument("--dataset_name", type=str, default="cnn_dailymail", help="The name of the dataset to use via the datasets library.")
-    parser.add_argument("--task_type", type=str, required=True, choices=["summarization", "classification"], help="The type of task to run, choices: summarization, classification")
     parser.add_argument("--dataset_config_name", type=str, default="3.0.0", help="The configuration name of the dataset to use via the datasets library.")
     parser.add_argument("--max_source_length", type=int, default=1024, help="The maximum total input sequence length after tokenization. Sequences longer than this will be truncated, sequences shorter will be padded.")
     parser.add_argument("--source_prefix", type=str, default="", help="A prefix to add before every source text, useful for T5 models.")
@@ -192,6 +196,17 @@ def get_model(args):
     return model, tokenizer
 
 
+def postprocess_text_for_eval(preds, labels):
+    preds = [pred.strip() for pred in preds]
+    labels = [label.strip() for label in labels]
+
+    # rougeLSum expects newline after each sentence
+    preds = ["\n".join(nltk.sent_tokenize(pred)) for pred in preds]
+    labels = ["\n".join(nltk.sent_tokenize(label)) for label in labels]
+
+    return preds, labels
+
+
 @torch.no_grad()
 def evaluate_model(
     model,
@@ -203,9 +218,7 @@ def evaluate_model(
     max_length=None,
     num_beams=None,
     max_iters=None,
-    postprocess_text=None,
 ):
-    assert postprocess_text is not None, "Need to pass a postprocess_text function to evaluate_model"
     model.eval()
     pbar = tqdm(
         dataloader,
@@ -250,7 +263,7 @@ def evaluate_model(
                 logger.info(f"Example of predictions: {decoded_preds[0]}")
                 logger.info(f"Example of labels: {labels_str[0]}")
 
-            decoded_preds, labels_str = postprocess_text(decoded_preds, labels_str)
+            decoded_preds, labels_str = postprocess_text_for_eval(decoded_preds, labels_str)
             metric.add_batch(predictions=decoded_preds, references=labels_str)
 
     result = metric.compute(use_stemmer=True)
@@ -281,17 +294,12 @@ def main():
     else:
         args.total_batch_size = args.gradient_accumulation_steps * args.per_device_train_batch_size * accelerator.num_processes
 
-    if "t5" in args.model_name_or_path and args.source_prefix is None:
-        logger.warning(
-            "You're running a t5 model but didn't provide a source prefix, which is the expected, e.g. with "
-            "`--source_prefix 'summarize: ' `"
-        )
-
     if args.seed is not None:
         set_seed(args.seed)
 
     if accelerator.is_main_process and args.output_dir is not None:
         os.makedirs(args.output_dir, exist_ok=True)
+
     accelerator.wait_for_everyone()
 
     accelerator.init_trackers(args.wandb_project, init_kwargs={"wandb": {"tags": args.tags}})
@@ -323,20 +331,94 @@ def main():
     if model.config.decoder_start_token_id is None:
         raise ValueError("Make sure that `config.decoder_start_token_id` is correctly defined")
 
-    # get preprocessed dataset
-    args, model, tokenizer, accelerator, logger, train_dataloader, eval_dataloader = data_utils.preprocess_data(
-        args=args,
-        mode=model,
-        tokenizer=tokenizer,
-        accelerator=accelerator,
-        logger=logger,
+    if "t5" in args.model_name_or_path and args.source_prefix is None:
+        logger.warning(
+            "You're running a t5 model but didn't provide a source prefix, which is the expected, e.g. with "
+            "`--source_prefix 'summarize: ' `"
+        )
+
+    # Preprocessing the datasets.
+    # First we tokenize all the texts.
+    column_names = raw_datasets["train"].column_names
+
+    # Get the column names for input/target.
+    dataset_columns = summarization_name_mapping.get(args.dataset_name, None)
+    if args.text_column is None:
+        text_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
+    else:
+        text_column = args.text_column
+        if text_column not in column_names:
+            raise ValueError(f"--text_column' value '{args.text_column}' needs to be one of: {', '.join(column_names)}")
+    if args.summary_column is None:
+        summary_column = dataset_columns[1] if dataset_columns is not None else column_names[1]
+    else:
+        summary_column = args.summary_column
+        if summary_column not in column_names:
+            raise ValueError(f"--summary_column' value '{args.summary_column}' needs to be one of: {', '.join(column_names)}")
+
+    padding = "max_length" if args.pad_to_max_length else False
+
+    def preprocess_function(examples, is_eval=False):
+        inputs = examples[text_column]
+        targets = examples[summary_column]
+        inputs = [args.source_prefix + inp for inp in inputs]
+
+        model_inputs = tokenizer(inputs, max_length=args.max_source_length, padding=padding, truncation=True)
+
+        # Tokenize targets with the `text_target` keyword argument
+        labels = tokenizer(text_target=targets, max_length=args.max_target_length, padding=padding, truncation=True)
+
+        # If we are padding here, replace all tokenizer.pad_token_id in the labels by -100 when we want to ignore
+        # padding in the loss.
+        if padding == "max_length":
+            labels["input_ids"] = [
+                [(l if l != tokenizer.pad_token_id else -100) for l in label] for label in labels["input_ids"]
+            ]
+
+        model_inputs["labels"] = labels["input_ids"]
+        if is_eval:
+            model_inputs["metadata"] = [{"targets": t} for t in targets]
+        return model_inputs
+
+    with accelerator.main_process_first():
+        eval_dataset = raw_datasets["validation"].map(
+            preprocess_function,
+            batched=True,
+            num_proc=args.preprocessing_num_workers,
+            remove_columns=column_names,
+            desc="Running tokenizer on val dataset  ",
+            fn_kwargs={"is_eval": True},
+        )
+        train_dataset = raw_datasets["train"].map(
+            preprocess_function,
+            batched=True,
+            batch_size=min(5000, len(raw_datasets["train"]) // args.preprocessing_num_workers),
+            num_proc=args.preprocessing_num_workers,
+            remove_columns=column_names,
+            desc="Running tokenizer on train dataset",
+        )
+
+    # Log a few random samples from the training set:
+    if args.verbocity > 1:
+        for index in random.sample(range(len(train_dataset)), 1):
+            logger.info(f"Sample {index} of the training set:")
+            for k, v in train_dataset[index].items():
+                if hasattr(v, "shape"):
+                    logger.info(f"  {k}.shape: {v.shape}")
+                logger.info(f"  {k}: {v}")
+
+    label_pad_token_id = -100
+    data_collator = DataCollatorForSeq2SeqWithMetadata(
+        tokenizer,
+        model=model,
+        label_pad_token_id=label_pad_token_id,
+        pad_to_multiple_of=8,
     )
 
-    # define postprocess function
-    if args.task_type == "classification":
-        postprocess_text = data_utils.postprocess_classification
-    else:
-        postprocess_text = data_utils.postprocess_summarization
+    train_dataloader = DataLoader(
+        train_dataset, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
+    )
+    eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
 
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
@@ -401,19 +483,14 @@ def main():
     if accelerator.is_main_process:
         wandb.config.update(experiment_config)
 
-    # Define metric
-    if args.dataset_name in ["glue", "super_glue"]:
-        assert args.task_type == "classification", "Classification task type is required for GLUE and SuperGLUE datasets"
-        metric = evaluate.load(args.dataset_name, args.dataset_config_name)
-    else:
-        assert args.task_type == "summarization", "Summarization task type is required for non-GLUE and non-SuperGLUE datasets"
-        metric = evaluate.load("rouge")
+    # Metric
+    metric = evaluate.load("rouge")
 
     # Train!
     total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataloader) * total_batch_size}")
+    logger.info(f"  Num examples = {len(train_dataset)}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
@@ -462,17 +539,18 @@ def main():
             resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
             starting_epoch = resume_step // len(train_dataloader)
             resume_step -= starting_epoch * len(train_dataloader)
-            update_step = resume_step // args.gradient_accumulation_steps
+            update_step = resume_step // args.gradient_accumulation_stepp
 
         progress_bar.update(update_step)
 
+    active_dataloader = train_dataloader
     if args.resume_from_checkpoint and resume_step is not None:
-        train_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
+        active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
 
     for epoch in range(starting_epoch, args.num_train_epochs):
         model.train()
 
-        for batch in train_dataloader:
+        for batch in active_dataloader:
             global_step += 1
 
             outputs = model(**batch)
@@ -513,7 +591,6 @@ def main():
                     max_length=args.val_max_target_length,
                     num_beams=1,
                     max_iters=args.max_eval_steps_durig_validation,
-                    postprocess_text=postprocess_text,
                 )
                 logger.info(pformat(result))
                 accelerator.log(result, step=update_step)

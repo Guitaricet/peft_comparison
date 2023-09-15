@@ -39,7 +39,7 @@ task_to_keys = {
 }
 
 label_names_mapping = {
-    # taken from, 
+    # taken from,
     # glue: https://github.com/tensorflow/datasets/blob/1e12611a0be5f4753d271d7eb1dde15eb8f0185c/docs/community_catalog/huggingface/glue.md
     # super_glue: https://github.com/tensorflow/datasets/blob/1e12611a0be5f4753d271d7eb1dde15eb8f0185c/docs/community_catalog/huggingface/super_glue.md
     "cola": [
@@ -125,7 +125,7 @@ def preprocess_glue_one_example(x, benchmark_name, label_names, feature_names=No
     """
 
     CODE SOURCE: https://github.com/google-research/text-to-text-transfer-transformer/blob/24d9d3b89b129e586bbfe35cffbc5926d88adc5e/t5/data/preprocessors.py#L734C1-L812C12
-    
+
     Convert a dataset from glue to text2text examples.
 
     This function uses the feature names from the dataset to unpack examples into
@@ -212,7 +212,7 @@ def preprocess_glue(
     accelerator,
     logger,
 ):
-    
+
     #
     raw_datasets = load_dataset(args.dataset_name, args.dataset_config_name)
     label_names = label_names_mapping[args.dataset_config_name]
@@ -222,17 +222,17 @@ def preprocess_glue(
     for instance in raw_datasets["train"]:
         instance_dict = preprocess_glue_one_example(
             x=instance,
-            benchmark_name=args.dataset_config_name, 
+            benchmark_name=args.dataset_config_name,
             label_names=label_names,
         )
         train_dataset.append(instance_dict)
     train_dataset = datasets.Dataset.from_dict(train_dataset)
-    
+
     eval_dataset = []
     for instance in raw_datasets["eval"]:
         instance_dict = preprocess_glue_one_example(
             x=instance,
-            benchmark_name=args.dataset_config_name, 
+            benchmark_name=args.dataset_config_name,
             label_names=label_names,
         )
         eval_dataset.append(instance_dict)
@@ -347,16 +347,6 @@ def preprocess_summarization(
         pad_to_multiple_of=8 if accelerator.use_fp16 else None,
     )
 
-    def postprocess_text(preds, labels):
-        preds = [pred.strip() for pred in preds]
-        labels = [label.strip() for label in labels]
-
-        # rougeLSum expects newline after each sentence
-        preds = ["\n".join(nltk.sent_tokenize(pred)) for pred in preds]
-        labels = ["\n".join(nltk.sent_tokenize(label)) for label in labels]
-
-        return preds, labels
-
     train_dataloader = DataLoader(
         train_dataset, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
     )
@@ -371,7 +361,7 @@ def preprocess_data(
     accelerator,
     logger,
 ):
-    
+
     if args.task_type == "summarization":
         args, model, tokenizer, accelerator, logger, train_dataloader, eval_dataloader = preprocess_summarization(
             args=args,
@@ -380,8 +370,8 @@ def preprocess_data(
             accelerator=accelerator,
             logger=logger,
         )
-    
-    elif args.task_type == "glue":
+
+    elif args.task_type == "classification":
         args, model, tokenizer, accelerator, logger, train_dataloader, eval_dataloader = preprocess_glue(
             args=args,
             model=model,
@@ -389,10 +379,9 @@ def preprocess_data(
             accelerator=accelerator,
             logger=logger,
         )
+    else:
+        raise ValueError(f"Task type {args.task_type} not supported.")
 
-
-    
-    
     return args, model, tokenizer, accelerator, logger, train_dataloader, eval_dataloader
 
 """Following functions are postprocessing functions.
@@ -530,3 +519,32 @@ def wsc_simple(prediction, example=None, is_target=False):
         referent_words) or referent_words.issubset(prediction_words)
 
   return int(predicted_referent)
+
+def postprocess_summarization(preds, labels, dataset_config_name=None):
+    preds = [pred.strip() for pred in preds]
+    labels = [label.strip() for label in labels]
+
+    # rougeLSum expects newline after each sentence
+    preds = ["\n".join(nltk.sent_tokenize(pred)) for pred in preds]
+    labels = ["\n".join(nltk.sent_tokenize(label)) for label in labels]
+
+    return preds, labels
+
+def postprocess_classification(preds, labels, dataset_config_name=None):
+
+
+    #
+    pred_ids, label_ids = [], []
+    for idx, pred in enumerate(preds):
+        pred_id = string_label_to_class_id(
+            string_label=pred.lower(),
+            label_classes=label_names_mapping[dataset_config_name]
+            )
+        label_id = string_label_to_class_id(
+            string_label=labels[idx].lower(),
+            label_classes=label_names_mapping[dataset_config_name]
+            )
+        pred_ids.append(pred_id)
+        label_ids.append(label_id)
+
+    return pred_ids, label_ids
