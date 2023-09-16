@@ -180,9 +180,7 @@ def preprocess_glue_one_example(x, benchmark_name, label_names, feature_names=No
     if x['label'] == -1:
         label_name = "<unk>"
     else:
-        label_name = ""
-        for label_ in label_names:
-            label_name += label_names[x["label"]] + " "
+        label_name = label_names[x["label"]]
 
     ex = {}
     joined = " ".join(strs_to_join)
@@ -216,8 +214,13 @@ def preprocess_glue(
     #
     raw_datasets = load_dataset(args.dataset_name, args.dataset_config_name)
     label_names = label_names_mapping[args.dataset_config_name]
+    prefix = args.source_prefix
 
-    #
+    # @TODO: following line is hard coded. 
+    # Given how we are converting the cls task to s2s task, this should work.
+    column_names = ['idx', 'inputs', 'targets']#raw_datasets["train"].column_names
+
+    # @TODO: 
     train_dataset = []
     for instance in raw_datasets["train"]:
         instance_dict = preprocess_glue_one_example(
@@ -226,17 +229,80 @@ def preprocess_glue(
             label_names=label_names,
         )
         train_dataset.append(instance_dict)
-    train_dataset = datasets.Dataset.from_dict(train_dataset)
+    train_dataset = datasets.Dataset.from_list(train_dataset)
 
     eval_dataset = []
-    for instance in raw_datasets["eval"]:
+    for instance in raw_datasets["validation"]:
         instance_dict = preprocess_glue_one_example(
             x=instance,
             benchmark_name=args.dataset_config_name,
             label_names=label_names,
         )
         eval_dataset.append(instance_dict)
-    eval_dataset = datasets.Dataset.from_dict(eval_dataset)
+    eval_dataset = datasets.Dataset.from_list(eval_dataset)
+
+    #
+    def tokenize_function(examples):
+        inputs = examples["inputs"]
+        targets = examples["targets"]
+        inputs = [prefix + inp for inp in inputs]
+        padding = "max_length" if args.pad_to_max_length else False
+
+        #
+        print(type(inputs))
+        print(inputs[0])
+        print(type(targets))
+        print(targets[0])
+
+        # Tokenize targets with the `text_target` keyword argument
+        model_inputs = tokenizer(inputs, max_length=args.max_source_length, padding=padding, truncation=True)
+        labels = tokenizer(text_target=targets, max_length=args.max_target_length, padding=padding, truncation=True)
+
+        # If we are padding here, replace all tokenizer.pad_token_id in the labels by -100 when we want to ignore
+        # padding in the loss.
+        if padding == "max_length" and args.ignore_pad_token_for_loss:
+            labels["input_ids"] = [
+                [(l if l != tokenizer.pad_token_id else -100) for l in label] for label in labels["input_ids"]
+            ]
+        model_inputs["labels"] = labels["input_ids"]
+
+        #
+        print("="*100)
+        print(model_inputs)
+
+
+        return model_inputs
+
+    #
+    with accelerator.main_process_first():
+        train_dataset = train_dataset.map(
+            tokenize_function,
+            batched=True,
+            num_proc=args.preprocessing_num_workers,
+            remove_columns=column_names,
+            load_from_cache_file=not args.overwrite_cache,
+            desc="Running tokenizer on train dataset",
+        )
+
+        # Temporarily set max_target_length for validation.
+        max_target_length = args.val_max_target_length
+        eval_dataset = eval_dataset.map(
+            tokenize_function,
+            batched=True,
+            num_proc=args.preprocessing_num_workers,
+            remove_columns=column_names,
+            load_from_cache_file=not args.overwrite_cache,
+            desc="Running tokenizer on val dataset",
+        )
+    
+    #
+    #train_dataset = tokenize_function(train_dataset)
+    #eval_dataset = tokenize_function(eval_dataset)
+
+    #
+    logger.info("\nSizes of train and validation datasets: ")
+    logger.info(f"  Num train examples = {len(train_dataset)}")
+    logger.info(f"  Num eval examples = {len(eval_dataset)}\n")
 
     #
     label_pad_token_id = -100 if args.ignore_pad_token_for_loss else tokenizer.pad_token_id

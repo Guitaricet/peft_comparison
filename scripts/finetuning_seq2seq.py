@@ -17,7 +17,6 @@
 Fine-tuning a 🤗 Transformers model on summarization.
 """
 # You can also adapt this script on your own summarization task. Pointers for this are left as comments.
-
 import os
 import argparse
 import json
@@ -227,6 +226,7 @@ def evaluate_model(
                 attention_mask=batch["attention_mask"],
                 max_length=max_length,
                 num_beams=num_beams,
+                min_length=1,
             )
 
             generated_tokens = accelerator.pad_across_processes(
@@ -261,6 +261,7 @@ def evaluate_model(
 
 
 def main():
+    from loguru import logger
     args = parse_args()
 
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
@@ -326,11 +327,12 @@ def main():
     # get preprocessed dataset
     args, model, tokenizer, accelerator, logger, train_dataloader, eval_dataloader = data_utils.preprocess_data(
         args=args,
-        mode=model,
+        model=model,
         tokenizer=tokenizer,
         accelerator=accelerator,
         logger=logger,
     )
+    logger.info(f"Dataloader object type: {type(train_dataloader)}")
 
     # define postprocess function
     if args.task_type == "classification":
