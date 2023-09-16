@@ -2,7 +2,7 @@
 
 #
 export CUDA_VISIBLE_DEVICES=1
-experiment_name="t5_base_cb_lora"
+experiment_name="t5_3b_cb_lora"
 if [[ -f results/$experiment_name/all_results.json ]]; then
     echo "Experiment $experiment_name is already completed. Continuing to next experiment."
 else
@@ -11,7 +11,7 @@ else
         --output_dir "results/$experiment_name"\
         --seed 0 \
         --task_type "classification" \
-        --model_name_or_path "t5-base" \
+        --model_name_or_path "t5-3b" \
         --dataset_name "super_glue" \
         --dataset_config_name "cb" \
         --peft_method "lora" \
@@ -29,8 +29,8 @@ else
         --lr_scheduler_type "linear" \
         --lr_scheduler_warmup_percent 0.06 \
         --weight_decay 0 \
-        --num_train_epochs 1 \
-        --eval_every_steps 1 \
+        --num_train_epochs 20 \
+        --eval_every_steps 100 \
         --wandb_project "PEFT_comparison" \
         --source_prefix "" \
 

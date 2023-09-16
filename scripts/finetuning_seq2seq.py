@@ -253,7 +253,7 @@ def evaluate_model(
             decoded_preds, labels_str = postprocess_text(decoded_preds, labels_str)
             metric.add_batch(predictions=decoded_preds, references=labels_str)
 
-    result = metric.compute(use_stemmer=True)
+    result = metric.compute()  # add use_stemmer=True when summarization
     result = {f"eval/{k}": round(v * 100, 4) for k, v in result.items()}
 
     model.train()
