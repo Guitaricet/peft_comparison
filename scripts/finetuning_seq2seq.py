@@ -512,7 +512,7 @@ def main():
                     tokenizer=tokenizer,
                     dataloader=eval_dataloader,
                     accelerator=accelerator,
-                    max_length=args.val_max_target_length,
+                    max_length=args.val_max_target_length if args.val_max_target_length else args.max_target_length,
                     num_beams=1,
                     max_iters=args.max_eval_steps_durig_validation,
                     postprocess_text=postprocess_text,
