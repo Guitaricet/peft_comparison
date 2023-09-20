@@ -46,7 +46,8 @@ from datasets import load_dataset
 import wandb
 from tqdm.auto import tqdm, trange
 from loguru import logger
-import data_utils
+
+import peft_comparison.data_utils as data_utils
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 datasets.utils.logging.set_verbosity_error()
