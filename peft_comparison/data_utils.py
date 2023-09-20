@@ -294,12 +294,7 @@ def preprocess_glue(
             load_from_cache_file=not args.overwrite_cache,
             desc="Running tokenizer on val dataset",
         )
-    
-    #
-    #train_dataset = tokenize_function(train_dataset)
-    #eval_dataset = tokenize_function(eval_dataset)
 
-    #
     logger.info("\nSizes of train and validation datasets: ")
     logger.info(f"  Num train examples = {len(train_dataset)}")
     logger.info(f"  Num eval examples = {len(eval_dataset)}\n")
