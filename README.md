@@ -8,7 +8,7 @@ Notice that we require specifically `adapter-transformers` (right before the 2.0
 
 ```bash
 pip install -e .
-cd adapter-transformers
+cd adapters
 pip install -e .
 cd ..
 python -m nltk.downloader punkt

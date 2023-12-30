@@ -1,0 +1,92 @@
+name: Tests
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/**"
+      - "src/**"
+      - "examples/**"
+      - "templates/**"
+      - "tests/**"
+      - "utils/**"
+      - "setup.py"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/**"
+      - "src/**"
+      - "examples/**"
+      - "templates/**"
+      - "tests/**"
+      - "utils/**"
+      - "setup.py"
+  workflow_dispatch:
+
+jobs:
+  check_code_quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: true
+      - uses: actions/setup-python@v2
+        with:
+          python-version: 3.8
+      - uses: actions/cache@v2
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('setup.py') }}
+      - name: Install
+        run: |
+          pip install torch==2.1.1
+          pip install .[quality]
+      - name: Check Quality and Repo Consistency
+        run: |
+          make quality
+  test_adapter_methods:
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: true
+      - uses: actions/setup-python@v2
+        with:
+          python-version: 3.8
+      - uses: actions/cache@v2
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('setup.py') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      - name: Install
+        run: |
+          pip install torch==2.1.1
+          pip install .[sklearn,testing,sentencepiece]
+      - name: Test
+        run: |
+          make test-adapter-methods
+  test_adapter_models:
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: true
+      - uses: actions/setup-python@v2
+        with:
+          python-version: 3.8
+      - uses: actions/cache@v2
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('setup.py') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      - name: Install
+        run: |
+          pip install torch==2.1.1
+          pip install .[sklearn,testing,sentencepiece]
+      - name: Test
+        run: |
+          make test-adapter-models
